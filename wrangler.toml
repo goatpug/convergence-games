@@ -7,3 +7,8 @@ compatibility_flags = ["nodejs_compat"]
 binding = "GAME_STATE"
 id = "151bf2db12704b7ca1d819c6374ba8de"
 preview_id = "151bf2db12704b7ca1d819c6374ba8de"
+
+[observability]
+[observability.logs]
+enabled = true
+invocation_logs = true
