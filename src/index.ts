@@ -1,25 +1,22 @@
 /**
  * Convergence Games - MCP Server
- * Cloudflare Worker implementation
- *
- * Games:
- *   📖 Story Weaver  - collaborative turn-based storytelling
- *   🧠 20 Questions  - classic yes/no guessing game
- *   🔗 Word Chain    - word association chain
- *   🎭 Riddle Box    - riddles with hints
- *   🗺️  Tiny RPG     - micro text adventure
+ * Pure Cloudflare Workers implementation (no SDK transport layer)
+ * MCP protocol implemented directly over JSON-RPC 2.0
  */
 
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { z } from "zod";
+interface Env {
+  GAME_STATE: KVNamespace;
+}
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-interface Env {
-  GAME_STATE: KVNamespace;
+interface JsonRpcRequest {
+  jsonrpc: "2.0";
+  id: string | number | null;
+  method: string;
+  params?: Record<string, unknown>;
 }
 
 interface StoryState {
@@ -97,26 +94,26 @@ const RIDDLES = [
   },
 ];
 
-const RPG_OPENINGS = [
-  {
+const RPG_OPENINGS: Record<string, { scene: string; hp: number }> = {
+  library: {
     scene:
       "You stand at the entrance of the Whispering Library — a vast, impossible building where books shelve themselves and the librarian hasn't been seen in forty years. A note on the door reads: 'Find the Book of Unwritten Endings. It has escaped again.' Your inventory is empty. What do you do?",
     hp: 10,
   },
-  {
+  sea: {
     scene:
       "You wake up in a small boat floating on a luminescent purple sea. There's a compass that only points toward 'something interesting,' a jar of pickles, and a map with only one location marked: 'HERE (probably).' The horizon has three islands. What do you do?",
     hp: 10,
   },
-  {
+  bureau: {
     scene:
       "You're the newest employee at the Bureau of Impossible Problems. Your first case file reads: 'A town's shadows have gone missing. Citizens are complaining about the glare.' Your office has a window, a telephone that rings in languages that don't exist, and a rubber duck on the desk. What do you do?",
     hp: 10,
   },
-];
+};
 
 // ---------------------------------------------------------------------------
-// Helper
+// KV helpers
 // ---------------------------------------------------------------------------
 
 function makeId(prefix: string): string {
@@ -132,561 +129,531 @@ async function putState(kv: KVNamespace, id: string, state: unknown, ttl = 86400
   await kv.put(id, JSON.stringify(state), { expirationTtl: ttl });
 }
 
-function notFound(): ReturnType<Parameters<McpServer["tool"]>[3]> {
-  return { content: [{ type: "text", text: "❌ Session not found! Double-check your session ID." }] };
+function notFoundText(): string {
+  return "❌ Session not found! Double-check your session ID.";
 }
 
 // ---------------------------------------------------------------------------
-// Server factory
+// Tool definitions (for tools/list)
 // ---------------------------------------------------------------------------
 
-function createServer(env: Env): McpServer {
-  const server = new McpServer({
-    name: "Convergence Games",
-    version: "1.0.0",
-  });
-
-  // ==========================================================================
-  // 📖 STORY WEAVER
-  // ==========================================================================
-
-  server.tool(
-    "story_start",
-    "Start a new collaborative story. Returns a session_id to share with your co-author.",
-    {
-      genre: z
-        .enum(["fantasy", "sci-fi", "horror", "romance", "absurdist", "mystery", "fairy-tale"])
-        .describe("Story genre"),
-      title: z.string().describe("Give the story a title"),
-      author_name: z.string().describe("Your name as it will appear in the story"),
-      opening: z.string().describe("Your opening paragraph or lines to kick things off"),
+const TOOLS = [
+  // Story Weaver
+  {
+    name: "story_start",
+    description: "Start a new collaborative story. Returns a session_id to share with your co-author.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        genre: { type: "string", enum: ["fantasy", "sci-fi", "horror", "romance", "absurdist", "mystery", "fairy-tale"] },
+        title: { type: "string", description: "Give the story a title" },
+        author_name: { type: "string", description: "Your name as it will appear in the story" },
+        opening: { type: "string", description: "Your opening paragraph" },
+      },
+      required: ["genre", "title", "author_name", "opening"],
     },
-    async ({ genre, title, author_name, opening }) => {
+  },
+  {
+    name: "story_add",
+    description: "Add your paragraph to the collaborative story",
+    inputSchema: {
+      type: "object",
+      properties: {
+        session_id: { type: "string" },
+        author_name: { type: "string" },
+        text: { type: "string", description: "Your contribution to the story" },
+      },
+      required: ["session_id", "author_name", "text"],
+    },
+  },
+  {
+    name: "story_read",
+    description: "Read the full current story",
+    inputSchema: {
+      type: "object",
+      properties: { session_id: { type: "string" } },
+      required: ["session_id"],
+    },
+  },
+  // 20 Questions
+  {
+    name: "twentyq_start",
+    description: "Host a 20 Questions game. Think of something secretly — share the session ID with the guesser.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        answer: { type: "string", description: "What you're thinking of (keep secret!)" },
+        category: { type: "string", description: "Broad hint: animal, place, person, object, concept, etc." },
+      },
+      required: ["answer", "category"],
+    },
+  },
+  {
+    name: "twentyq_ask",
+    description: "Ask a yes/no question. The host must fill in host_answer honestly.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        session_id: { type: "string" },
+        question: { type: "string" },
+        host_answer: { type: "string", enum: ["yes", "no", "sometimes", "kind of", "not exactly"] },
+      },
+      required: ["session_id", "question", "host_answer"],
+    },
+  },
+  {
+    name: "twentyq_guess",
+    description: "Make a guess at what the host is thinking of",
+    inputSchema: {
+      type: "object",
+      properties: {
+        session_id: { type: "string" },
+        guess: { type: "string" },
+      },
+      required: ["session_id", "guess"],
+    },
+  },
+  {
+    name: "twentyq_reveal",
+    description: "Give up and reveal the answer (host use only)",
+    inputSchema: {
+      type: "object",
+      properties: { session_id: { type: "string" } },
+      required: ["session_id"],
+    },
+  },
+  // Word Chain
+  {
+    name: "wordchain_start",
+    description: "Start a word association chain",
+    inputSchema: {
+      type: "object",
+      properties: {
+        first_word: { type: "string" },
+        author_name: { type: "string" },
+      },
+      required: ["first_word", "author_name"],
+    },
+  },
+  {
+    name: "wordchain_add",
+    description: "Add your word to the association chain with a brief explanation",
+    inputSchema: {
+      type: "object",
+      properties: {
+        session_id: { type: "string" },
+        word: { type: "string" },
+        author_name: { type: "string" },
+        reason: { type: "string", description: "How this connects to the previous word" },
+      },
+      required: ["session_id", "word", "author_name", "reason"],
+    },
+  },
+  {
+    name: "wordchain_read",
+    description: "Read the current word chain",
+    inputSchema: {
+      type: "object",
+      properties: { session_id: { type: "string" } },
+      required: ["session_id"],
+    },
+  },
+  // Riddle Box
+  {
+    name: "riddle_new",
+    description: "Get a new riddle to solve",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "riddle_hint",
+    description: "Get the next hint for a riddle",
+    inputSchema: {
+      type: "object",
+      properties: { session_id: { type: "string" } },
+      required: ["session_id"],
+    },
+  },
+  {
+    name: "riddle_answer",
+    description: "Submit your answer to the riddle",
+    inputSchema: {
+      type: "object",
+      properties: {
+        session_id: { type: "string" },
+        answer: { type: "string" },
+      },
+      required: ["session_id", "answer"],
+    },
+  },
+  // Tiny RPG
+  {
+    name: "rpg_start",
+    description: "Start a micro text adventure RPG with absurdist vibes",
+    inputSchema: {
+      type: "object",
+      properties: {
+        player_name: { type: "string" },
+        scenario: { type: "string", enum: ["library", "sea", "bureau"] },
+      },
+      required: ["player_name", "scenario"],
+    },
+  },
+  {
+    name: "rpg_act",
+    description: "Take an action in the RPG. The narrator fills in narrator_response with what happens.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        session_id: { type: "string" },
+        action: { type: "string", description: "What does your character do?" },
+        narrator_response: { type: "string", description: "NARRATOR: what happens as a result?" },
+        hp_change: { type: "number", description: "HP change (-5 to 3, 0 = no change)", default: 0 },
+        item_gained: { type: "string", description: "Item the player gains (optional)" },
+        item_lost: { type: "string", description: "Item the player loses (optional)" },
+      },
+      required: ["session_id", "action", "narrator_response"],
+    },
+  },
+  {
+    name: "rpg_status",
+    description: "Check current RPG game status and history",
+    inputSchema: {
+      type: "object",
+      properties: { session_id: { type: "string" } },
+      required: ["session_id"],
+    },
+  },
+];
+
+// ---------------------------------------------------------------------------
+// Tool handlers
+// ---------------------------------------------------------------------------
+
+async function handleTool(name: string, args: Record<string, unknown>, env: Env): Promise<string> {
+  switch (name) {
+    // ---- Story Weaver ----
+    case "story_start": {
       const id = makeId("story");
       const state: StoryState = {
-        genre,
-        title,
-        entries: [{ author: author_name, text: opening }],
+        genre: args.genre as string,
+        title: args.title as string,
+        entries: [{ author: args.author_name as string, text: args.opening as string }],
       };
       await putState(env.GAME_STATE, id, state);
-      return {
-        content: [
-          {
-            type: "text",
-            text: [
-              `✨ **Story started!**`,
-              `Session ID: \`${id}\``,
-              ``,
-              `📖 **${title}** _(${genre})_`,
-              ``,
-              `--- ${author_name} ---`,
-              opening,
-              ``,
-              `Share the session ID with your co-author so they can continue!`,
-            ].join("\n"),
-          },
-        ],
-      };
+      return [
+        `✨ **Story started!**`,
+        `Session ID: \`${id}\``,
+        ``,
+        `📖 **${state.title}** _(${state.genre})_`,
+        ``,
+        `--- ${args.author_name} ---`,
+        args.opening as string,
+        ``,
+        `Share the session ID with your co-author so they can continue!`,
+      ].join("\n");
     }
-  );
 
-  server.tool(
-    "story_add",
-    "Add your paragraph to the collaborative story",
-    {
-      session_id: z.string().describe("The story session ID"),
-      author_name: z.string().describe("Your name"),
-      text: z.string().describe("Your contribution to the story"),
-    },
-    async ({ session_id, author_name, text }) => {
-      const state = await getState<StoryState>(env.GAME_STATE, session_id);
-      if (!state) return notFound();
-
-      state.entries.push({ author: author_name, text });
-      await putState(env.GAME_STATE, session_id, state);
-
+    case "story_add": {
+      const state = await getState<StoryState>(env.GAME_STATE, args.session_id as string);
+      if (!state) return notFoundText();
+      state.entries.push({ author: args.author_name as string, text: args.text as string });
+      await putState(env.GAME_STATE, args.session_id as string, state);
       const fullStory = state.entries.map((e) => `--- ${e.author} ---\n${e.text}`).join("\n\n");
-      return {
-        content: [
-          {
-            type: "text",
-            text: [
-              `📖 **${state.title}** _(${state.genre})_`,
-              `${state.entries.length} entries so far`,
-              ``,
-              fullStory,
-            ].join("\n"),
-          },
-        ],
-      };
+      return [`📖 **${state.title}** _(${state.genre})_`, `${state.entries.length} entries so far`, ``, fullStory].join("\n");
     }
-  );
 
-  server.tool(
-    "story_read",
-    "Read the full current story",
-    { session_id: z.string() },
-    async ({ session_id }) => {
-      const state = await getState<StoryState>(env.GAME_STATE, session_id);
-      if (!state) return notFound();
-
+    case "story_read": {
+      const state = await getState<StoryState>(env.GAME_STATE, args.session_id as string);
+      if (!state) return notFoundText();
       const fullStory = state.entries.map((e) => `--- ${e.author} ---\n${e.text}`).join("\n\n");
-      return {
-        content: [
-          {
-            type: "text",
-            text: [
-              `📖 **${state.title}** _(${state.genre})_`,
-              `${state.entries.length} entries`,
-              ``,
-              fullStory,
-            ].join("\n"),
-          },
-        ],
-      };
+      return [`📖 **${state.title}** _(${state.genre})_`, `${state.entries.length} entries`, ``, fullStory].join("\n");
     }
-  );
 
-  // ==========================================================================
-  // 🧠 20 QUESTIONS
-  // ==========================================================================
-
-  server.tool(
-    "twentyq_start",
-    "Host a 20 Questions game. Think of something and set it secretly — share the session ID with the guesser.",
-    {
-      answer: z.string().describe("What you're thinking of (kept secret from guesser — don't share this!)"),
-      category: z.string().describe("Broad hint: 'animal', 'place', 'person', 'object', 'concept', etc."),
-    },
-    async ({ answer, category }) => {
+    // ---- 20 Questions ----
+    case "twentyq_start": {
       const id = makeId("20q");
       const state: TwentyQState = {
-        answer: answer.toLowerCase().trim(),
-        category,
+        answer: (args.answer as string).toLowerCase().trim(),
+        category: args.category as string,
         questions: [],
         guesses: [],
         solved: false,
       };
       await putState(env.GAME_STATE, id, state, 3600 * 4);
-      return {
-        content: [
-          {
-            type: "text",
-            text: [
-              `🧠 **20 Questions started!**`,
-              `Session ID: \`${id}\``,
-              `Category hint for guesser: **${category}**`,
-              ``,
-              `Share the session ID (NOT the answer!) with the guesser.`,
-              `They'll use \`twentyq_ask\` and you'll answer yes/no each time.`,
-            ].join("\n"),
-          },
-        ],
-      };
+      return [
+        `🧠 **20 Questions started!**`,
+        `Session ID: \`${id}\``,
+        `Category hint for guesser: **${state.category}**`,
+        ``,
+        `Share the session ID (NOT the answer!) with the guesser.`,
+      ].join("\n");
     }
-  );
 
-  server.tool(
-    "twentyq_ask",
-    "Ask a yes/no question. The host must answer honestly via the host_answer field.",
-    {
-      session_id: z.string(),
-      question: z.string().describe("Your yes/no question about what the host is thinking of"),
-      host_answer: z
-        .enum(["yes", "no", "sometimes", "kind of", "not exactly"])
-        .describe("HOST: fill this in with your honest answer"),
-    },
-    async ({ session_id, question, host_answer }) => {
-      const state = await getState<TwentyQState>(env.GAME_STATE, session_id);
-      if (!state) return notFound();
-      if (state.solved) return { content: [{ type: "text", text: "🎉 Game already solved!" }] };
-
-      state.questions.push({ q: question, a: host_answer });
-      await putState(env.GAME_STATE, session_id, state, 3600 * 4);
-
+    case "twentyq_ask": {
+      const state = await getState<TwentyQState>(env.GAME_STATE, args.session_id as string);
+      if (!state) return notFoundText();
+      if (state.solved) return "🎉 Game already solved!";
+      state.questions.push({ q: args.question as string, a: args.host_answer as string });
+      await putState(env.GAME_STATE, args.session_id as string, state, 3600 * 4);
       const remaining = 20 - state.questions.length;
       const log = state.questions.map((item, i) => `${i + 1}. ${item.q} → **${item.a}**`).join("\n");
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: [
-              `Category: **${state.category}**`,
-              ``,
-              log,
-              ``,
-              remaining > 0
-                ? `❓ ${remaining} question${remaining === 1 ? "" : "s"} remaining — use \`twentyq_guess\` when ready!`
-                : `⚠️ Last question used! Make your guess with \`twentyq_guess\`!`,
-            ].join("\n"),
-          },
-        ],
-      };
+      return [
+        `Category: **${state.category}**`,
+        ``,
+        log,
+        ``,
+        remaining > 0
+          ? `❓ ${remaining} question${remaining === 1 ? "" : "s"} remaining`
+          : `⚠️ Last question used! Make your guess with \`twentyq_guess\`!`,
+      ].join("\n");
     }
-  );
 
-  server.tool(
-    "twentyq_guess",
-    "Make a guess at what the host is thinking of",
-    {
-      session_id: z.string(),
-      guess: z.string().describe("Your guess"),
-    },
-    async ({ session_id, guess }) => {
-      const state = await getState<TwentyQState>(env.GAME_STATE, session_id);
-      if (!state) return notFound();
-
-      const correct = guess.toLowerCase().trim() === state.answer;
-      state.guesses.push(guess);
+    case "twentyq_guess": {
+      const state = await getState<TwentyQState>(env.GAME_STATE, args.session_id as string);
+      if (!state) return notFoundText();
+      const correct = (args.guess as string).toLowerCase().trim() === state.answer;
+      state.guesses.push(args.guess as string);
       if (correct) state.solved = true;
-      await putState(env.GAME_STATE, session_id, state, 3600 * 4);
-
+      await putState(env.GAME_STATE, args.session_id as string, state, 3600 * 4);
       if (correct) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: `🎉 **CORRECT!** The answer was **${state.answer}**!\nSolved in ${state.questions.length} question${state.questions.length === 1 ? "" : "s"} and ${state.guesses.length} guess${state.guesses.length === 1 ? "" : "es"}!`,
-            },
-          ],
-        };
+        return `🎉 **CORRECT!** The answer was **${state.answer}**!\nSolved in ${state.questions.length} questions and ${state.guesses.length} guess${state.guesses.length === 1 ? "" : "es"}!`;
       }
-
-      const remaining = 20 - state.questions.length;
-      return {
-        content: [
-          {
-            type: "text",
-            text: [
-              `❌ Not **${guess}**! Keep asking questions...`,
-              `Previous guesses: ${state.guesses.join(", ")}`,
-              `${remaining} question${remaining === 1 ? "" : "s"} remaining.`,
-            ].join("\n"),
-          },
-        ],
-      };
+      return `❌ Not **${args.guess}**! Previous guesses: ${state.guesses.join(", ")}\n${20 - state.questions.length} questions remaining.`;
     }
-  );
 
-  server.tool(
-    "twentyq_reveal",
-    "Give up and reveal the answer (host use only)",
-    { session_id: z.string() },
-    async ({ session_id }) => {
-      const state = await getState<TwentyQState>(env.GAME_STATE, session_id);
-      if (!state) return notFound();
-      return {
-        content: [
-          {
-            type: "text",
-            text: `🔓 The answer was: **${state.answer}**\n\nBetter luck next time! 😄`,
-          },
-        ],
-      };
+    case "twentyq_reveal": {
+      const state = await getState<TwentyQState>(env.GAME_STATE, args.session_id as string);
+      if (!state) return notFoundText();
+      return `🔓 The answer was: **${state.answer}**\n\nBetter luck next time! 😄`;
     }
-  );
 
-  // ==========================================================================
-  // 🔗 WORD CHAIN
-  // ==========================================================================
-
-  server.tool(
-    "wordchain_start",
-    "Start a word association chain. Players take turns adding words that connect to the previous one.",
-    {
-      first_word: z.string().describe("The first word in the chain"),
-      author_name: z.string().describe("Your name"),
-    },
-    async ({ first_word, author_name }) => {
+    // ---- Word Chain ----
+    case "wordchain_start": {
       const id = makeId("wc");
       const state: WordChainState = {
-        chain: [{ word: first_word, author: author_name, reason: "starting word" }],
+        chain: [{ word: args.first_word as string, author: args.author_name as string, reason: "starting word" }],
       };
       await putState(env.GAME_STATE, id, state);
-      return {
-        content: [
-          {
-            type: "text",
-            text: [
-              `🔗 **Word Chain started!**`,
-              `Session ID: \`${id}\``,
-              ``,
-              `Current chain: **${first_word}** _(${author_name})_`,
-              ``,
-              `Share the session ID! Use \`wordchain_add\` to keep it going.`,
-              `Each word should connect to the previous one — be creative!`,
-            ].join("\n"),
-          },
-        ],
-      };
+      return [
+        `🔗 **Word Chain started!**`,
+        `Session ID: \`${id}\``,
+        ``,
+        `Current chain: **${args.first_word}** _(${args.author_name})_`,
+        ``,
+        `Share the session ID! Use \`wordchain_add\` to keep it going.`,
+      ].join("\n");
     }
-  );
 
-  server.tool(
-    "wordchain_add",
-    "Add your word to the association chain with a brief explanation of the connection",
-    {
-      session_id: z.string(),
-      word: z.string().describe("Your next word"),
-      author_name: z.string(),
-      reason: z.string().describe("Brief explanation of how this connects to the previous word"),
-    },
-    async ({ session_id, word, author_name, reason }) => {
-      const state = await getState<WordChainState>(env.GAME_STATE, session_id);
-      if (!state) return notFound();
-
-      state.chain.push({ word, author: author_name, reason });
-      await putState(env.GAME_STATE, session_id, state);
-
-      const chainDisplay = state.chain
-        .map((link, i) => (i === 0 ? `**${link.word}** _(${link.author})_` : `→ **${link.word}** _(${link.author}: ${link.reason})_`))
+    case "wordchain_add": {
+      const state = await getState<WordChainState>(env.GAME_STATE, args.session_id as string);
+      if (!state) return notFoundText();
+      state.chain.push({ word: args.word as string, author: args.author_name as string, reason: args.reason as string });
+      await putState(env.GAME_STATE, args.session_id as string, state);
+      const display = state.chain
+        .map((l, i) => (i === 0 ? `**${l.word}** _(${l.author})_` : `→ **${l.word}** _(${l.author}: ${l.reason})_`))
         .join("\n");
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: [`🔗 Chain — ${state.chain.length} links`, ``, chainDisplay].join("\n"),
-          },
-        ],
-      };
+      return [`🔗 Chain — ${state.chain.length} links`, ``, display].join("\n");
     }
-  );
 
-  server.tool(
-    "wordchain_read",
-    "Read the current word chain",
-    { session_id: z.string() },
-    async ({ session_id }) => {
-      const state = await getState<WordChainState>(env.GAME_STATE, session_id);
-      if (!state) return notFound();
-
-      const chainDisplay = state.chain
-        .map((link, i) => (i === 0 ? `**${link.word}** _(${link.author})_` : `→ **${link.word}** _(${link.author}: ${link.reason})_`))
+    case "wordchain_read": {
+      const state = await getState<WordChainState>(env.GAME_STATE, args.session_id as string);
+      if (!state) return notFoundText();
+      const display = state.chain
+        .map((l, i) => (i === 0 ? `**${l.word}** _(${l.author})_` : `→ **${l.word}** _(${l.author}: ${l.reason})_`))
         .join("\n");
-
-      return {
-        content: [{ type: "text", text: [`🔗 Chain — ${state.chain.length} links`, ``, chainDisplay].join("\n") }],
-      };
+      return [`🔗 Chain — ${state.chain.length} links`, ``, display].join("\n");
     }
-  );
 
-  // ==========================================================================
-  // 🎭 RIDDLE BOX
-  // ==========================================================================
-
-  server.tool(
-    "riddle_new",
-    "Get a new riddle to solve together (or competitively!)",
-    {},
-    async () => {
+    // ---- Riddle Box ----
+    case "riddle_new": {
       const id = makeId("riddle");
       const riddle = RIDDLES[Math.floor(Math.random() * RIDDLES.length)];
       const state: RiddleState = { riddle, hintsUsed: 0, solved: false };
       await putState(env.GAME_STATE, id, state, 3600 * 2);
-      return {
-        content: [
-          {
-            type: "text",
-            text: [
-              `🎭 **RIDDLE!**`,
-              `Session ID: \`${id}\``,
-              ``,
-              riddle.q,
-              ``,
-              `Use \`riddle_hint\` for a hint (${riddle.hints.length} available) or \`riddle_answer\` to guess!`,
-            ].join("\n"),
-          },
-        ],
-      };
+      return [
+        `🎭 **RIDDLE!**`,
+        `Session ID: \`${id}\``,
+        ``,
+        riddle.q,
+        ``,
+        `Use \`riddle_hint\` for a hint (${riddle.hints.length} available) or \`riddle_answer\` to guess!`,
+      ].join("\n");
     }
-  );
 
-  server.tool(
-    "riddle_hint",
-    "Get the next hint for a riddle",
-    { session_id: z.string() },
-    async ({ session_id }) => {
-      const state = await getState<RiddleState>(env.GAME_STATE, session_id);
-      if (!state) return notFound();
-      if (state.solved) return { content: [{ type: "text", text: "Riddle already solved! 🎉" }] };
-
+    case "riddle_hint": {
+      const state = await getState<RiddleState>(env.GAME_STATE, args.session_id as string);
+      if (!state) return notFoundText();
+      if (state.solved) return "Riddle already solved! 🎉";
       const hint = state.riddle.hints[state.hintsUsed];
-      if (!hint) return { content: [{ type: "text", text: "No more hints! Take your best guess with `riddle_answer`!" }] };
-
+      if (!hint) return "No more hints! Take your best guess with `riddle_answer`!";
       state.hintsUsed++;
-      await putState(env.GAME_STATE, session_id, state, 3600 * 2);
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: `💡 Hint ${state.hintsUsed}/${state.riddle.hints.length}: **${hint}**`,
-          },
-        ],
-      };
+      await putState(env.GAME_STATE, args.session_id as string, state, 3600 * 2);
+      return `💡 Hint ${state.hintsUsed}/${state.riddle.hints.length}: **${hint}**`;
     }
-  );
 
-  server.tool(
-    "riddle_answer",
-    "Submit your answer to the riddle",
-    {
-      session_id: z.string(),
-      answer: z.string().describe("Your answer to the riddle"),
-    },
-    async ({ session_id, answer }) => {
-      const state = await getState<RiddleState>(env.GAME_STATE, session_id);
-      if (!state) return notFound();
-      if (state.solved) return { content: [{ type: "text", text: "Already solved! 🎉" }] };
-
-      const correct = answer.toLowerCase().trim() === state.riddle.a;
+    case "riddle_answer": {
+      const state = await getState<RiddleState>(env.GAME_STATE, args.session_id as string);
+      if (!state) return notFoundText();
+      if (state.solved) return "Already solved! 🎉";
+      const correct = (args.answer as string).toLowerCase().trim() === state.riddle.a;
       if (correct) state.solved = true;
-      await putState(env.GAME_STATE, session_id, state, 3600 * 2);
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: correct
-              ? `🎉 **CORRECT!** The answer was **${state.riddle.a}**!${state.hintsUsed === 0 ? " And you didn't even need a hint! 🧠" : ` (Used ${state.hintsUsed} hint${state.hintsUsed > 1 ? "s" : ""})`}`
-              : `❌ Not **${answer}**! ${state.hintsUsed < state.riddle.hints.length ? "Try a hint?" : "Keep thinking..."}`,
-          },
-        ],
-      };
+      await putState(env.GAME_STATE, args.session_id as string, state, 3600 * 2);
+      return correct
+        ? `🎉 **CORRECT!** The answer was **${state.riddle.a}**!${state.hintsUsed === 0 ? " No hints needed! 🧠" : ` (Used ${state.hintsUsed} hint${state.hintsUsed > 1 ? "s" : ""})`}`
+        : `❌ Not **${args.answer}**! ${state.hintsUsed < state.riddle.hints.length ? "Try a hint?" : "Keep thinking..."}`;
     }
-  );
 
-  // ==========================================================================
-  // 🗺️ TINY RPG
-  // ==========================================================================
-
-  server.tool(
-    "rpg_start",
-    "Start a micro text adventure RPG with absurdist vibes",
-    {
-      player_name: z.string().describe("Your character's name"),
-      scenario: z.enum(["library", "sea", "bureau"]).describe(
-        "library = Whispering Library, sea = Luminescent Sea, bureau = Bureau of Impossible Problems"
-      ),
-    },
-    async ({ player_name, scenario }) => {
+    // ---- Tiny RPG ----
+    case "rpg_start": {
       const id = makeId("rpg");
-      const openings: Record<string, (typeof RPG_OPENINGS)[0]> = {
-        library: RPG_OPENINGS[0],
-        sea: RPG_OPENINGS[1],
-        bureau: RPG_OPENINGS[2],
-      };
-      const opening = openings[scenario];
+      const scenario = args.scenario as string;
+      const opening = RPG_OPENINGS[scenario] ?? RPG_OPENINGS.library;
       const state: RpgState = {
         scene: opening.scene,
         inventory: [],
         history: [],
         hp: opening.hp,
         maxHp: opening.hp,
-        playerName: player_name,
+        playerName: args.player_name as string,
       };
       await putState(env.GAME_STATE, id, state);
-      return {
-        content: [
-          {
-            type: "text",
-            text: [
-              `🗺️ **TINY RPG** — A ${scenario === "library" ? "Whispering Library" : scenario === "sea" ? "Luminescent Sea" : "Bureau of Impossible Problems"} Adventure`,
-              `Session ID: \`${id}\``,
-              `Player: **${player_name}** | HP: ${"❤️".repeat(opening.hp)}`,
-              ``,
-              opening.scene,
-            ].join("\n"),
-          },
-        ],
-      };
+      const scenarioName = scenario === "library" ? "Whispering Library" : scenario === "sea" ? "Luminescent Sea" : "Bureau of Impossible Problems";
+      return [
+        `🗺️ **TINY RPG** — ${scenarioName}`,
+        `Session ID: \`${id}\``,
+        `Player: **${args.player_name}** | HP: ${"❤️".repeat(opening.hp)}`,
+        ``,
+        opening.scene,
+      ].join("\n");
     }
-  );
 
-  server.tool(
-    "rpg_act",
-    "Take an action in the RPG. The narrator (your partner or Claude) responds with what happens.",
-    {
-      session_id: z.string(),
-      action: z.string().describe("What does your character do?"),
-      narrator_response: z.string().describe(
-        "NARRATOR: write what happens as a result of this action! Be creative, absurdist, and fun."
-      ),
-      hp_change: z.number().min(-5).max(3).default(0).describe("HP change: negative = damage, positive = healing, 0 = no change"),
-      item_gained: z.string().optional().describe("If the player finds/gains an item, name it here"),
-      item_lost: z.string().optional().describe("If the player loses an item, name it here"),
-    },
-    async ({ session_id, action, narrator_response, hp_change, item_gained, item_lost }) => {
-      const state = await getState<RpgState>(env.GAME_STATE, session_id);
-      if (!state) return notFound();
-
-      state.history.push({ action, result: narrator_response });
-      state.hp = Math.max(0, Math.min(state.maxHp, state.hp + hp_change));
-
-      if (item_gained) state.inventory.push(item_gained);
-      if (item_lost) state.inventory = state.inventory.filter((i) => i !== item_lost);
-
-      await putState(env.GAME_STATE, session_id, state);
-
+    case "rpg_act": {
+      const state = await getState<RpgState>(env.GAME_STATE, args.session_id as string);
+      if (!state) return notFoundText();
+      state.history.push({ action: args.action as string, result: args.narrator_response as string });
+      const hpChange = (args.hp_change as number) ?? 0;
+      state.hp = Math.max(0, Math.min(state.maxHp, state.hp + hpChange));
+      if (args.item_gained) state.inventory.push(args.item_gained as string);
+      if (args.item_lost) state.inventory = state.inventory.filter((i) => i !== args.item_lost);
+      await putState(env.GAME_STATE, args.session_id as string, state);
       const hpDisplay = state.hp > 0 ? `${"❤️".repeat(state.hp)}${"🖤".repeat(state.maxHp - state.hp)}` : "💀 DEFEATED";
       const invDisplay = state.inventory.length > 0 ? state.inventory.join(", ") : "nothing";
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: [
-              `🗺️ **${state.playerName}** | HP: ${hpDisplay} | Inventory: ${invDisplay}`,
-              ``,
-              `> ${action}`,
-              ``,
-              narrator_response,
-              ``,
-              state.hp === 0 ? "💀 **GAME OVER** — start a new adventure with \`rpg_start\`!" : "",
-            ]
-              .filter(Boolean)
-              .join("\n"),
-          },
-        ],
-      };
+      return [
+        `🗺️ **${state.playerName}** | HP: ${hpDisplay} | Inventory: ${invDisplay}`,
+        ``,
+        `> ${args.action}`,
+        ``,
+        args.narrator_response as string,
+        ``,
+        state.hp === 0 ? "💀 **GAME OVER** — start a new adventure with `rpg_start`!" : "",
+      ]
+        .filter(Boolean)
+        .join("\n");
     }
-  );
 
-  server.tool(
-    "rpg_status",
-    "Check current RPG game status and history",
-    { session_id: z.string() },
-    async ({ session_id }) => {
-      const state = await getState<RpgState>(env.GAME_STATE, session_id);
-      if (!state) return notFound();
-
+    case "rpg_status": {
+      const state = await getState<RpgState>(env.GAME_STATE, args.session_id as string);
+      if (!state) return notFoundText();
       const hpDisplay = `${"❤️".repeat(state.hp)}${"🖤".repeat(state.maxHp - state.hp)}`;
       const invDisplay = state.inventory.length > 0 ? state.inventory.join(", ") : "nothing";
       const recentHistory = state.history
         .slice(-5)
         .map((h) => `> ${h.action}\n${h.result}`)
         .join("\n\n");
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: [
-              `🗺️ **${state.playerName}**`,
-              `HP: ${hpDisplay} | Inventory: ${invDisplay}`,
-              ``,
-              `**Recent history:**`,
-              recentHistory || "Nothing yet!",
-            ].join("\n"),
-          },
-        ],
-      };
+      return [
+        `🗺️ **${state.playerName}**`,
+        `HP: ${hpDisplay} | Inventory: ${invDisplay}`,
+        ``,
+        `**Recent history:**`,
+        recentHistory || "Nothing yet!",
+      ].join("\n");
     }
-  );
 
-  return server;
+    default:
+      return `Unknown tool: ${name}`;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// MCP JSON-RPC handler
+// ---------------------------------------------------------------------------
+
+function jsonRpcResponse(id: string | number | null, result: unknown): Response {
+  return new Response(JSON.stringify({ jsonrpc: "2.0", id, result }), {
+    headers: {
+      "Content-Type": "application/json",
+      "Access-Control-Allow-Origin": "*",
+    },
+  });
+}
+
+function jsonRpcError(id: string | number | null, code: number, message: string): Response {
+  return new Response(JSON.stringify({ jsonrpc: "2.0", id, error: { code, message } }), {
+    headers: {
+      "Content-Type": "application/json",
+      "Access-Control-Allow-Origin": "*",
+    },
+  });
+}
+
+async function handleMcp(request: Request, env: Env): Promise<Response> {
+  if (request.method === "OPTIONS") {
+    return new Response(null, {
+      headers: {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, POST, DELETE",
+        "Access-Control-Allow-Headers": "Content-Type, Accept, Mcp-Session-Id",
+      },
+    });
+  }
+
+  if (request.method !== "POST") {
+    return new Response("Method not allowed", { status: 405 });
+  }
+
+  let body: JsonRpcRequest;
+  try {
+    body = await request.json() as JsonRpcRequest;
+  } catch {
+    return jsonRpcError(null, -32700, "Parse error");
+  }
+
+  const { id, method, params = {} } = body;
+
+  switch (method) {
+    case "initialize":
+      return jsonRpcResponse(id, {
+        protocolVersion: "2024-11-05",
+        capabilities: { tools: {} },
+        serverInfo: { name: "Convergence Games", version: "1.0.0" },
+      });
+
+    case "notifications/initialized":
+      return new Response(null, { status: 204 });
+
+    case "tools/list":
+      return jsonRpcResponse(id, { tools: TOOLS });
+
+    case "tools/call": {
+      const toolName = (params as { name?: string }).name;
+      const toolArgs = (params as { arguments?: Record<string, unknown> }).arguments ?? {};
+      if (!toolName) return jsonRpcError(id, -32602, "Missing tool name");
+      try {
+        const result = await handleTool(toolName, toolArgs, env);
+        return jsonRpcResponse(id, {
+          content: [{ type: "text", text: result }],
+        });
+      } catch (e) {
+        return jsonRpcError(id, -32603, `Tool error: ${String(e)}`);
+      }
+    }
+
+    case "ping":
+      return jsonRpcResponse(id, {});
+
+    default:
+      return jsonRpcError(id, -32601, `Method not found: ${method}`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -697,58 +664,26 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
 
-    // Health check / landing page
     if (url.pathname === "/") {
       return new Response(
         [
           "💙 Convergence Games MCP Server",
           "",
-          "Connect your MCP client to: /mcp",
+          "MCP endpoint: /mcp",
           "",
-          "Available games:",
+          "Games:",
           "  📖 Story Weaver    — story_start, story_add, story_read",
           "  🧠 20 Questions    — twentyq_start, twentyq_ask, twentyq_guess, twentyq_reveal",
           "  🔗 Word Chain      — wordchain_start, wordchain_add, wordchain_read",
           "  🎭 Riddle Box      — riddle_new, riddle_hint, riddle_answer",
           "  🗺️  Tiny RPG        — rpg_start, rpg_act, rpg_status",
         ].join("\n"),
-        {
-          status: 200,
-          headers: { "Content-Type": "text/plain; charset=utf-8" },
-        }
+        { headers: { "Content-Type": "text/plain; charset=utf-8" } }
       );
     }
 
-    // MCP endpoint
     if (url.pathname === "/mcp") {
-      // Handle CORS preflight
-      if (request.method === "OPTIONS") {
-        return new Response(null, {
-          headers: {
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "GET, POST, DELETE",
-            "Access-Control-Allow-Headers": "Content-Type, Accept, Mcp-Session-Id",
-          },
-        });
-      }
-
-      const server = createServer(env);
-      const transport = new StreamableHTTPServerTransport({
-        sessionIdGenerator: () => crypto.randomUUID(),
-      });
-
-      await server.connect(transport);
-
-      const response = await transport.handleRequest(request);
-
-      // Add CORS headers to all MCP responses
-      const headers = new Headers(response.headers);
-      headers.set("Access-Control-Allow-Origin", "*");
-
-      return new Response(response.body, {
-        status: response.status,
-        headers,
-      });
+      return handleMcp(request, env);
     }
 
     return new Response("Not found", { status: 404 });
