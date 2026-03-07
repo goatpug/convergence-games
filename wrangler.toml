@@ -1,0 +1,13 @@
+name = "convergence-games"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+compatibility_flags = ["nodejs_compat"]
+
+[[kv_namespaces]]
+binding = "GAME_STATE"
+id = "REPLACE_WITH_YOUR_KV_ID"
+preview_id = "REPLACE_WITH_YOUR_PREVIEW_KV_ID"
+
+# After installing wrangler, run:
+#   npm run kv:create
+# to generate the KV namespace and get your IDs, then paste them above.
