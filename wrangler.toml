@@ -5,9 +5,12 @@ compatibility_flags = ["nodejs_compat"]
 
 [[kv_namespaces]]
 binding = "GAME_STATE"
-id = "REPLACE_WITH_YOUR_KV_ID"
-preview_id = "REPLACE_WITH_YOUR_PREVIEW_KV_ID"
+id = "151bf2db12704b7ca1d819c6374ba8de"
+preview_id = "151bf2db12704b7ca1d819c6374ba8de"
+```
 
-# After installing wrangler, run:
-#   npm run kv:create
-# to generate the KV namespace and get your IDs, then paste them above.
+(Using the same ID for both is fine for our purposes — preview vs production distinction doesn't matter here.)
+
+**Build command** — use:
+```
+npm run deploy
