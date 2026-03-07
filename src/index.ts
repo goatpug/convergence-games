@@ -657,13 +657,96 @@ async function handleMcp(request: Request, env: Env): Promise<Response> {
 }
 
 // ---------------------------------------------------------------------------
+// OAuth helpers (trivial/public — no real auth, just satisfies claude.ai)
+// ---------------------------------------------------------------------------
+
+function oauthJson(data: unknown): Response {
+  return new Response(JSON.stringify(data), {
+    headers: {
+      "Content-Type": "application/json",
+      "Access-Control-Allow-Origin": "*",
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Worker entry point
 // ---------------------------------------------------------------------------
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+    const origin = url.origin;
 
+    // CORS preflight
+    if (request.method === "OPTIONS") {
+      return new Response(null, {
+        headers: {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "GET, POST, DELETE",
+          "Access-Control-Allow-Headers": "Content-Type, Accept, Authorization, Mcp-Session-Id",
+        },
+      });
+    }
+
+    // ---- OAuth discovery: protected resource metadata ----
+    if (url.pathname === "/.well-known/oauth-protected-resource") {
+      return oauthJson({
+        resource: origin,
+        authorization_servers: [`${origin}`],
+        bearer_methods_supported: ["header"],
+      });
+    }
+
+    // ---- OAuth discovery: authorization server metadata ----
+    if (url.pathname === "/.well-known/oauth-authorization-server") {
+      return oauthJson({
+        issuer: origin,
+        authorization_endpoint: `${origin}/authorize`,
+        token_endpoint: `${origin}/token`,
+        registration_endpoint: `${origin}/register`,
+        response_types_supported: ["code"],
+        grant_types_supported: ["authorization_code"],
+        code_challenge_methods_supported: ["S256"],
+      });
+    }
+
+    // ---- Dynamic Client Registration ----
+    if (url.pathname === "/register" && request.method === "POST") {
+      const body = await request.json().catch(() => ({})) as Record<string, unknown>;
+      return oauthJson({
+        client_id: "convergence-public-client",
+        client_name: body.client_name ?? "MCP Client",
+        redirect_uris: body.redirect_uris ?? [],
+        grant_types: ["authorization_code"],
+        response_types: ["code"],
+        token_endpoint_auth_method: "none",
+      });
+    }
+
+    // ---- OAuth authorize: immediately redirect back with a code ----
+    if (url.pathname === "/authorize") {
+      const redirectUri = url.searchParams.get("redirect_uri");
+      const state = url.searchParams.get("state");
+      const code = "convergence-open-access";
+      if (!redirectUri) return new Response("Missing redirect_uri", { status: 400 });
+      const redirect = new URL(redirectUri);
+      redirect.searchParams.set("code", code);
+      if (state) redirect.searchParams.set("state", state);
+      return Response.redirect(redirect.toString(), 302);
+    }
+
+    // ---- OAuth token: accept any code, return a dummy token ----
+    if (url.pathname === "/token" && request.method === "POST") {
+      return oauthJson({
+        access_token: "convergence-open-token",
+        token_type: "bearer",
+        expires_in: 86400 * 365,
+        scope: "mcp",
+      });
+    }
+
+    // ---- Landing page ----
     if (url.pathname === "/") {
       return new Response(
         [
@@ -682,6 +765,7 @@ export default {
       );
     }
 
+    // ---- MCP endpoint ----
     if (url.pathname === "/mcp") {
       return handleMcp(request, env);
     }
