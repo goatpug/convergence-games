@@ -52,6 +52,15 @@ interface RpgState {
   playerName: string;
 }
 
+interface HangmanState {
+  word: string;
+  guessedLetters: string[];   // all letters guessed so far
+  wrongLetters: string[];     // letters not in word
+  hostName: string;
+  solved: boolean;
+  failed: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // Static data
 // ---------------------------------------------------------------------------
@@ -111,6 +120,48 @@ const RPG_OPENINGS: Record<string, { scene: string; hp: number }> = {
     hp: 10,
   },
 };
+
+const MAX_WRONG = 6;
+
+const HANGMAN_STAGES = [
+  // 0 wrong — just the gallows
+  "  +---+\n  |   |\n  |\n  |\n  |\n  |\n=====",
+  // 1 — head
+  "  +---+\n  |   |\n  |   O\n  |\n  |\n  |\n=====",
+  // 2 — body
+  "  +---+\n  |   |\n  |   O\n  |   |\n  |\n  |\n=====",
+  // 3 — left arm
+  "  +---+\n  |   |\n  |   O\n  |  \\|\n  |\n  |\n=====",
+  // 4 — both arms
+  "  +---+\n  |   |\n  |   O\n  |  \\|/\n  |\n  |\n=====",
+  // 5 — left leg
+  "  +---+\n  |   |\n  |   O\n  |  \\|/\n  |   |\n  |  /\n=====",
+  // 6 — both legs — ded
+  "  +---+\n  |   |\n  |   O\n  |  \\|/\n  |   |\n  |  / \\\n=====",
+];
+
+function buildHangmanDisplay(state: HangmanState): string {
+  const stage = HANGMAN_STAGES[Math.min(state.wrongLetters.length, MAX_WRONG)];
+  const pattern = state.word
+    .split("")
+    .map((c) => (state.guessedLetters.includes(c) ? c.toUpperCase() : "_"))
+    .join(" ");
+  const wrongDisplay = state.wrongLetters.length > 0
+    ? `Wrong (${state.wrongLetters.length}/${MAX_WRONG}): ${state.wrongLetters.map((l) => l.toUpperCase()).join(", ")}`
+    : `No wrong guesses yet!`;
+  const lines = [
+    "```",
+    stage,
+    "```",
+    ``,
+    `**${pattern}**`,
+    ``,
+    wrongDisplay,
+  ];
+  if (state.solved) lines.push(``, `🎉 **SOLVED!** The word was **${state.word.toUpperCase()}**!`);
+  if (state.failed) lines.push(``, `💀 **GAME OVER!** The word was **${state.word.toUpperCase()}**.`);
+  return lines.join("\n");
+}
 
 // ---------------------------------------------------------------------------
 // KV helpers
@@ -283,6 +334,56 @@ const TOOLS = [
         answer: { type: "string" },
       },
       required: ["session_id", "answer"],
+    },
+  },
+  // Hangman
+  {
+    name: "hangman_start",
+    description: "Start a Hangman game where YOU (Claude) pick the secret word and the human guesses. The word is stored in KV — never revealed in the conversation unless the game ends. The human must NOT expand the tool call to see the word (honor system). Returns session_id and the blank pattern.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        word: { type: "string", description: "The secret word (lowercase, letters only). Store and forget — don't repeat it." },
+        host_name: { type: "string", description: "Your name as host (e.g. Claude)" },
+      },
+      required: ["word", "host_name"],
+    },
+  },
+  {
+    name: "hangman_guess",
+    description: "Process a letter guess in a Claude-hosted Hangman game. Call this each time the human guesses a letter.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        session_id: { type: "string" },
+        letter: { type: "string", description: "Single letter the human guessed" },
+      },
+      required: ["session_id", "letter"],
+    },
+  },
+  {
+    name: "hangman_render",
+    description: "Render a Hangman board for a HUMAN-hosted game (human picked the word, Claude guesses). Call this after the human tells you whether your guessed letter was correct and what the new pattern is. No KV needed — pure renderer.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        pattern: { type: "string", description: "Current pattern with underscores for unknown letters, e.g. '_ _ E _ _'" },
+        wrong_letters: {
+          type: "array",
+          items: { type: "string" },
+          description: "Letters guessed incorrectly so far",
+        },
+      },
+      required: ["pattern", "wrong_letters"],
+    },
+  },
+  {
+    name: "hangman_status",
+    description: "Show current state of a Claude-hosted Hangman game without making a guess.",
+    inputSchema: {
+      type: "object",
+      properties: { session_id: { type: "string" } },
+      required: ["session_id"],
     },
   },
   // Tiny RPG
@@ -569,6 +670,89 @@ async function handleTool(name: string, args: Record<string, unknown>, env: Env)
       ].join("\n");
     }
 
+    // ---- Hangman ----
+    case "hangman_start": {
+      const word = (args.word as string).toLowerCase().replace(/[^a-z]/g, "");
+      if (!word) return "❌ Word must contain letters only!";
+      const id = makeId("hm");
+      const state: HangmanState = {
+        word,
+        guessedLetters: [],
+        wrongLetters: [],
+        hostName: args.host_name as string,
+        solved: false,
+        failed: false,
+      };
+      await putState(env.GAME_STATE, id, state, 3600 * 4);
+      const blankPattern = Array(word.length).fill("_").join(" ");
+      return [
+        `🪢 **Hangman started!** (hosted by ${state.hostName})`,
+        `Session ID: \`${id}\``,
+        ``,
+        "```",
+        HANGMAN_STAGES[0],
+        "```",
+        ``,
+        `**${blankPattern}**`,
+        ``,
+        `${word.length} letters. Guess a letter!`,
+      ].join("\n");
+    }
+
+    case "hangman_guess": {
+      const state = await getState<HangmanState>(env.GAME_STATE, args.session_id as string);
+      if (!state) return notFoundText();
+      if (state.solved) return "🎉 Game already solved!";
+      if (state.failed) return "💀 Game already over! Start a new one with \`hangman_start\`.";
+      const letter = (args.letter as string).toLowerCase().trim()[0];
+      if (!letter || !/[a-z]/.test(letter)) return "❌ Please guess a single letter (a–z).";
+      if (state.guessedLetters.includes(letter)) {
+        return `⚠️ **${letter.toUpperCase()}** already guessed!\n\n${buildHangmanDisplay(state)}`;
+      }
+      state.guessedLetters.push(letter);
+      if (!state.word.includes(letter)) {
+        state.wrongLetters.push(letter);
+        if (state.wrongLetters.length >= MAX_WRONG) state.failed = true;
+      } else {
+        const allFound = state.word.split("").every((c) => state.guessedLetters.includes(c));
+        if (allFound) state.solved = true;
+      }
+      await putState(env.GAME_STATE, args.session_id as string, state, 3600 * 4);
+      const hit = state.word.includes(letter);
+      const header = hit
+        ? state.solved ? `🎉 **${letter.toUpperCase()}** — and that's the last one!` : `✅ **${letter.toUpperCase()}** is in the word!`
+        : state.failed ? `❌ **${letter.toUpperCase()}** — and that's the last strike. 💀` : `❌ **${letter.toUpperCase()}** — not in the word.`;
+      return [header, ``, buildHangmanDisplay(state)].join("\n");
+    }
+
+    case "hangman_render": {
+      // Pure renderer for human-hosted games — no KV
+      const rawPattern = (args.pattern as string).toUpperCase().replace(/\s+/g, " ").trim();
+      const wrongLetters = ((args.wrong_letters as string[]) ?? []).map((l) => l.toUpperCase());
+      const wrongCount = wrongLetters.length;
+      const stage = HANGMAN_STAGES[Math.min(wrongCount, MAX_WRONG)];
+      const wrongDisplay = wrongLetters.length > 0
+        ? `Wrong (${wrongCount}/${MAX_WRONG}): ${wrongLetters.join(", ")}`
+        : "No wrong guesses yet!";
+      const isDead = wrongCount >= MAX_WRONG;
+      return [
+        "```",
+        stage,
+        "```",
+        ``,
+        `**${rawPattern}**`,
+        ``,
+        wrongDisplay,
+        isDead ? `\n💀 **GAME OVER**` : "",
+      ].filter(Boolean).join("\n");
+    }
+
+    case "hangman_status": {
+      const state = await getState<HangmanState>(env.GAME_STATE, args.session_id as string);
+      if (!state) return notFoundText();
+      return buildHangmanDisplay(state);
+    }
+
     default:
       return `Unknown tool: ${name}`;
   }
@@ -760,6 +944,7 @@ export default {
           "  🔗 Word Chain      — wordchain_start, wordchain_add, wordchain_read",
           "  🎭 Riddle Box      — riddle_new, riddle_hint, riddle_answer",
           "  🗺️  Tiny RPG        — rpg_start, rpg_act, rpg_status",
+          "  🪢 Hangman         — hangman_start, hangman_guess, hangman_render, hangman_status",
         ].join("\n"),
         { headers: { "Content-Type": "text/plain; charset=utf-8" } }
       );
