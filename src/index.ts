@@ -288,7 +288,7 @@ const TOOLS = [
   },
   {
     name: "wordchain_add",
-    description: "Add your word to the association chain with a brief explanation",
+    description: "Add a word to the association chain. IMPORTANT: Every word from every player must be recorded via this tool — when the human gives you their word, call this tool for them FIRST (using their name), then call it again for your own word. Never skip a player's word.",
     inputSchema: {
       type: "object",
       properties: {
@@ -480,7 +480,7 @@ async function handleTool(name: string, args: Record<string, unknown>, env: Env)
         guesses: [],
         solved: false,
       };
-      await putState(env.GAME_STATE, id, state, 3600 * 4);
+      await putState(env.GAME_STATE, id, state, 86400 * 2);
       return [
         `🧠 **20 Questions started!**`,
         `Session ID: \`${id}\``,
@@ -495,7 +495,7 @@ async function handleTool(name: string, args: Record<string, unknown>, env: Env)
       if (!state) return notFoundText();
       if (state.solved) return "🎉 Game already solved!";
       state.questions.push({ q: args.question as string, a: args.host_answer as string });
-      await putState(env.GAME_STATE, args.session_id as string, state, 3600 * 4);
+      await putState(env.GAME_STATE, args.session_id as string, state, 86400 * 2);
       const remaining = 20 - state.questions.length;
       const log = state.questions.map((item, i) => `${i + 1}. ${item.q} → **${item.a}**`).join("\n");
       return [
@@ -515,7 +515,7 @@ async function handleTool(name: string, args: Record<string, unknown>, env: Env)
       const correct = (args.guess as string).toLowerCase().trim() === state.answer;
       state.guesses.push(args.guess as string);
       if (correct) state.solved = true;
-      await putState(env.GAME_STATE, args.session_id as string, state, 3600 * 4);
+      await putState(env.GAME_STATE, args.session_id as string, state, 86400 * 2);
       if (correct) {
         return `🎉 **CORRECT!** The answer was **${state.answer}**!\nSolved in ${state.questions.length} questions and ${state.guesses.length} guess${state.guesses.length === 1 ? "" : "es"}!`;
       }
@@ -570,7 +570,7 @@ async function handleTool(name: string, args: Record<string, unknown>, env: Env)
       const id = makeId("riddle");
       const riddle = RIDDLES[Math.floor(Math.random() * RIDDLES.length)];
       const state: RiddleState = { riddle, hintsUsed: 0, solved: false };
-      await putState(env.GAME_STATE, id, state, 3600 * 2);
+      await putState(env.GAME_STATE, id, state, 86400 * 2);
       return [
         `🎭 **RIDDLE!**`,
         `Session ID: \`${id}\``,
@@ -588,7 +588,7 @@ async function handleTool(name: string, args: Record<string, unknown>, env: Env)
       const hint = state.riddle.hints[state.hintsUsed];
       if (!hint) return "No more hints! Take your best guess with `riddle_answer`!";
       state.hintsUsed++;
-      await putState(env.GAME_STATE, args.session_id as string, state, 3600 * 2);
+      await putState(env.GAME_STATE, args.session_id as string, state, 86400 * 2);
       return `💡 Hint ${state.hintsUsed}/${state.riddle.hints.length}: **${hint}**`;
     }
 
@@ -598,7 +598,7 @@ async function handleTool(name: string, args: Record<string, unknown>, env: Env)
       if (state.solved) return "Already solved! 🎉";
       const correct = (args.answer as string).toLowerCase().trim() === state.riddle.a;
       if (correct) state.solved = true;
-      await putState(env.GAME_STATE, args.session_id as string, state, 3600 * 2);
+      await putState(env.GAME_STATE, args.session_id as string, state, 86400 * 2);
       return correct
         ? `🎉 **CORRECT!** The answer was **${state.riddle.a}**!${state.hintsUsed === 0 ? " No hints needed! 🧠" : ` (Used ${state.hintsUsed} hint${state.hintsUsed > 1 ? "s" : ""})`}`
         : `❌ Not **${args.answer}**! ${state.hintsUsed < state.riddle.hints.length ? "Try a hint?" : "Keep thinking..."}`;
@@ -683,7 +683,7 @@ async function handleTool(name: string, args: Record<string, unknown>, env: Env)
         solved: false,
         failed: false,
       };
-      await putState(env.GAME_STATE, id, state, 3600 * 4);
+      await putState(env.GAME_STATE, id, state, 86400 * 2);
       const blankPattern = Array(word.length).fill("_").join(" ");
       return [
         `🪢 **Hangman started!** (hosted by ${state.hostName})`,
@@ -717,7 +717,7 @@ async function handleTool(name: string, args: Record<string, unknown>, env: Env)
         const allFound = state.word.split("").every((c) => state.guessedLetters.includes(c));
         if (allFound) state.solved = true;
       }
-      await putState(env.GAME_STATE, args.session_id as string, state, 3600 * 4);
+      await putState(env.GAME_STATE, args.session_id as string, state, 86400 * 2);
       const hit = state.word.includes(letter);
       const header = hit
         ? state.solved ? `🎉 **${letter.toUpperCase()}** — and that's the last one!` : `✅ **${letter.toUpperCase()}** is in the word!`
