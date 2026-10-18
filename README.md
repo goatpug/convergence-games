@@ -13,6 +13,12 @@ Hosted on Cloudflare Workers (free tier). State persisted in Cloudflare KV.
 | 🔗 Word Chain | `wordchain_start`, `wordchain_add`, `wordchain_read` | Word association chain |
 | 🎭 Riddle Box | `riddle_new`, `riddle_hint`, `riddle_answer` | Riddles with hints |
 | 🗺️ Tiny RPG | `rpg_start`, `rpg_act`, `rpg_status` | Absurdist text adventure |
+| 🪢 Hangman | `hangman_start`, `hangman_guess`, `hangman_render`, `hangman_status` | Classic hangman, Claude- or human-hosted |
+| 🧙 Emoji Rogue | `rogue_start`, `rogue_join`, `rogue_act`, `rogue_look`, `rogue_status`, `rogue_codex`, `rogue_conduct` | Shared-dungeon roguelike — emoji grid, fog of war, permadeath, party Codex |
+
+### 🧙 Emoji Rogue in one breath
+
+The server is the dungeon master: the map is hidden in KV and nobody (Claude included) can see past the fog of war. One party, one dungeon, each player in their own chat — the conductor carries the session ID between windows, and monsters move only when the whole party has gone, so async play is fair. Walk into monsters to attack, onto items to pick them up. Potions and scrolls are mysteries until someone drinks one — then the whole party knows, and the **Codex** (`rogue_codex`, keyed by party name, no expiry) knows forever. Permadeath; the Codex is the only thing that survives. Full spec lives in the fable-5 repo at `specs/2026-08-26-emoji-rogue-spec.md`.
 
 ## Setup
 

@@ -4,6 +4,8 @@
  * MCP protocol implemented directly over JSON-RPC 2.0
  */
 
+import { ROGUE_TOOLS, handleRogueTool } from "./rogue";
+
 interface Env {
   GAME_STATE: KVNamespace;
 }
@@ -424,6 +426,8 @@ const TOOLS = [
       required: ["session_id"],
     },
   },
+  // Emoji Rogue 🧙
+  ...ROGUE_TOOLS,
 ];
 
 // ---------------------------------------------------------------------------
@@ -431,6 +435,7 @@ const TOOLS = [
 // ---------------------------------------------------------------------------
 
 async function handleTool(name: string, args: Record<string, unknown>, env: Env): Promise<string> {
+  if (name.startsWith("rogue_")) return handleRogueTool(name, args, env);
   switch (name) {
     // ---- Story Weaver ----
     case "story_start": {
@@ -945,6 +950,7 @@ export default {
           "  🎭 Riddle Box      — riddle_new, riddle_hint, riddle_answer",
           "  🗺️  Tiny RPG        — rpg_start, rpg_act, rpg_status",
           "  🪢 Hangman         — hangman_start, hangman_guess, hangman_render, hangman_status",
+          "  🧙 Emoji Rogue     — rogue_start, rogue_join, rogue_act, rogue_look, rogue_status, rogue_codex, rogue_conduct",
         ].join("\n"),
         { headers: { "Content-Type": "text/plain; charset=utf-8" } }
       );
