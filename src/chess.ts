@@ -1,7 +1,7 @@
 /**
  * ♟️ Chess — two players, one board, rules enforced by chess.js
  *
- * Built after the first Sharon × Opus 5.5 game (10/22/26), where the board
+ * Built after the first Sharon × Opus 5.5 game (10/21/26), where the board
  * lived in a scratchpad and the knights were goats. The server keeps the
  * position honest; the players (or the Claude relaying for a human) bring
  * the moves. Every game also has a board page at /chess/<game_id>.
