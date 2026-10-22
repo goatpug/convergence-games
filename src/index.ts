@@ -5,6 +5,7 @@
  */
 
 import { ROGUE_TOOLS, handleRogueTool } from "./rogue";
+import { CHESS_TOOLS, handleChessTool, renderChessPage } from "./chess";
 
 interface Env {
   GAME_STATE: KVNamespace;
@@ -428,14 +429,17 @@ const TOOLS = [
   },
   // Emoji Rogue 🧙
   ...ROGUE_TOOLS,
+  // Chess ♟️
+  ...CHESS_TOOLS,
 ];
 
 // ---------------------------------------------------------------------------
 // Tool handlers
 // ---------------------------------------------------------------------------
 
-async function handleTool(name: string, args: Record<string, unknown>, env: Env): Promise<string> {
+async function handleTool(name: string, args: Record<string, unknown>, env: Env, origin: string): Promise<string> {
   if (name.startsWith("rogue_")) return handleRogueTool(name, args, env);
+  if (name.startsWith("chess_")) return handleChessTool(name, args, env, origin);
   switch (name) {
     // ---- Story Weaver ----
     case "story_start": {
@@ -828,7 +832,7 @@ async function handleMcp(request: Request, env: Env): Promise<Response> {
       const toolArgs = (params as { arguments?: Record<string, unknown> }).arguments ?? {};
       if (!toolName) return jsonRpcError(id, -32602, "Missing tool name");
       try {
-        const result = await handleTool(toolName, toolArgs, env);
+        const result = await handleTool(toolName, toolArgs, env, new URL(request.url).origin);
         return jsonRpcResponse(id, {
           content: [{ type: "text", text: result }],
         });
@@ -951,9 +955,15 @@ export default {
           "  🗺️  Tiny RPG        — rpg_start, rpg_act, rpg_status",
           "  🪢 Hangman         — hangman_start, hangman_guess, hangman_render, hangman_status",
           "  🧙 Emoji Rogue     — rogue_start, rogue_join, rogue_act, rogue_look, rogue_status, rogue_codex, rogue_conduct",
+          "  ♟️  Chess           — chess_start, chess_move, chess_board, chess_undo, chess_end (board page: /chess/<game_id>)",
         ].join("\n"),
         { headers: { "Content-Type": "text/plain; charset=utf-8" } }
       );
+    }
+
+    // ---- Chess board page ----
+    if (url.pathname.startsWith("/chess/") && request.method === "GET") {
+      return renderChessPage(decodeURIComponent(url.pathname.slice("/chess/".length)), url.searchParams.get("flip") === "1", env);
     }
 
     // ---- MCP endpoint ----
