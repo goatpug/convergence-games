@@ -5,7 +5,7 @@
  */
 
 import { ROGUE_TOOLS, handleRogueTool } from "./rogue";
-import { CHESS_TOOLS, handleChessTool, renderChessPage } from "./chess";
+import { CHESS_TOOLS, handleChessTool, chessRoute } from "./chess";
 
 interface Env {
   GAME_STATE: KVNamespace;
@@ -961,9 +961,9 @@ export default {
       );
     }
 
-    // ---- Chess board page ----
-    if (url.pathname.startsWith("/chess/") && request.method === "GET") {
-      return renderChessPage(decodeURIComponent(url.pathname.slice("/chess/".length)), url.searchParams.get("flip") === "1", env);
+    // ---- Chess board page, its state poll, and tapped moves ----
+    if (url.pathname.startsWith("/chess/")) {
+      return chessRoute(request, url, env);
     }
 
     // ---- MCP endpoint ----
