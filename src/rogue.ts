@@ -165,7 +165,7 @@ async function kvPut(kv: GameKV, id: string, state: unknown, ttl?: number): Prom
 }
 
 async function saveRun(kv: GameKV, id: string, state: RogueState): Promise<void> {
-  await kvPut(kv, id, state, state.paused ? DAY * 30 : DAY * 7);
+  await kvPut(kv, id, state, state.paused ? undefined : DAY * 7); // paused runs wait forever
 }
 
 function rnd(state: RogueState): number {
@@ -1182,7 +1182,7 @@ export const ROGUE_TOOLS = [
   },
   {
     name: "rogue_conduct",
-    description: "Conductor housekeeping for an Emoji Rogue run: skip (absent player waits), pause (freezes the run, TTL 30 days), resume, abandon (ends the run).",
+    description: "Conductor housekeeping for an Emoji Rogue run: skip (absent player waits), pause (freezes the run until someone resumes it, no expiry), resume, abandon (ends the run).",
     inputSchema: {
       type: "object",
       properties: {
@@ -1333,7 +1333,7 @@ export async function handleRogueTool(name: string, args: Record<string, unknown
 
   if (name === "rogue_conduct") {
     const op = args.op as string;
-    if (op === "pause") { state.paused = true; await saveRun(kv, sessionId, state); return "⏸ Run paused. State is frozen for 30 days."; }
+    if (op === "pause") { state.paused = true; await saveRun(kv, sessionId, state); return "⏸ Run paused. State is frozen until someone resumes it, however long that takes."; }
     if (op === "resume") { state.paused = false; await saveRun(kv, sessionId, state); return `▶️ Run resumed. Next up: **${state.heroes[state.turnIdx]?.name}**.`; }
     if (op === "abandon") {
       state.over = true;
