@@ -2,17 +2,19 @@
  * 🧙 Emoji Rogue — a shared-dungeon roguelike for Convergence Games
  *
  * Spec: fable-5/specs/2026-08-26-emoji-rogue-spec.md
- * The server is the dungeon master: the map lives in KV, the rules are
+ * The server is the dungeon master: the map lives server-side, the rules are
  * deterministic (seeded PRNG), and no player — Claude or human — sees
  * anything the render doesn't show them.
  */
+
+import type { GameKV } from "./store";
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
 interface RogueEnv {
-  GAME_STATE: KVNamespace;
+  GAME_STATE: GameKV;
 }
 
 type ClassName = "mage" | "knight" | "rogue" | "ranger" | "corvid" | "cephalopod";
@@ -150,19 +152,19 @@ const DIRS: Record<string, [number, number]> = {
 const DAY = 86400;
 
 // ---------------------------------------------------------------------------
-// KV + PRNG helpers
+// Storage + PRNG helpers
 // ---------------------------------------------------------------------------
 
-async function kvGet<T>(kv: KVNamespace, id: string): Promise<T | null> {
+async function kvGet<T>(kv: GameKV, id: string): Promise<T | null> {
   const raw = await kv.get(id);
   return raw ? (JSON.parse(raw) as T) : null;
 }
 
-async function kvPut(kv: KVNamespace, id: string, state: unknown, ttl?: number): Promise<void> {
+async function kvPut(kv: GameKV, id: string, state: unknown, ttl?: number): Promise<void> {
   await kv.put(id, JSON.stringify(state), ttl ? { expirationTtl: ttl } : {});
 }
 
-async function saveRun(kv: KVNamespace, id: string, state: RogueState): Promise<void> {
+async function saveRun(kv: GameKV, id: string, state: RogueState): Promise<void> {
   await kvPut(kv, id, state, state.paused ? DAY * 30 : DAY * 7);
 }
 
@@ -537,7 +539,7 @@ function codexKey(partyName: string): string {
   return `codex:${partyName.toLowerCase().trim()}`;
 }
 
-async function loadCodex(kv: KVNamespace, partyName: string): Promise<Codex> {
+async function loadCodex(kv: GameKV, partyName: string): Promise<Codex> {
   return (
     (await kvGet<Codex>(kv, codexKey(partyName))) ?? {
       partyName, totalRuns: 0, deepestFloor: 0, effectsSeen: {}, monsters: {}, hallOfFame: [], victories: [],
@@ -545,7 +547,7 @@ async function loadCodex(kv: KVNamespace, partyName: string): Promise<Codex> {
   );
 }
 
-async function saveCodex(kv: KVNamespace, codex: Codex): Promise<void> {
+async function saveCodex(kv: GameKV, codex: Codex): Promise<void> {
   await kvPut(kv, codexKey(codex.partyName), codex); // no TTL — the Codex survives everything
 }
 
@@ -1107,7 +1109,7 @@ export const ROGUE_TOOLS = [
   {
     name: "rogue_start",
     description:
-      "🧙 EMOJI ROGUE — start a shared-dungeon roguelike run. The server is the dungeon master: the map is hidden in KV and nobody (Claude included) can see past the fog of war. Returns a session_id; every player then rogue_join's from their own chat. The starter is the conductor (can skip/pause). Codex knowledge is shared per party_name across all runs, forever.",
+      "🧙 EMOJI ROGUE — start a shared-dungeon roguelike run. The server is the dungeon master: the map is hidden on the server and nobody (Claude included) can see past the fog of war. Returns a session_id; every player then rogue_join's from their own chat. The starter is the conductor (can skip/pause). Codex knowledge is shared per party_name across all runs, forever.",
     inputSchema: {
       type: "object",
       properties: {

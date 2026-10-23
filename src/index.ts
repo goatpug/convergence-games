@@ -6,9 +6,18 @@
 
 import { ROGUE_TOOLS, handleRogueTool } from "./rogue";
 import { CHESS_TOOLS, handleChessTool, chessRoute } from "./chess";
+import { GameStore, gameStore, type GameKV } from "./store";
+
+export { GameStore };
 
 interface Env {
   GAME_STATE: KVNamespace;
+  GAME_STORE: DurableObjectNamespace<GameStore>;
+}
+
+// What the games see: the same GAME_STATE name, backed by Durable Objects now
+interface GameEnv {
+  GAME_STATE: GameKV;
 }
 
 // ---------------------------------------------------------------------------
@@ -167,19 +176,19 @@ function buildHangmanDisplay(state: HangmanState): string {
 }
 
 // ---------------------------------------------------------------------------
-// KV helpers
+// State helpers
 // ---------------------------------------------------------------------------
 
 function makeId(prefix: string): string {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
 }
 
-async function getState<T>(kv: KVNamespace, id: string): Promise<T | null> {
+async function getState<T>(kv: GameKV, id: string): Promise<T | null> {
   const raw = await kv.get(id);
   return raw ? (JSON.parse(raw) as T) : null;
 }
 
-async function putState(kv: KVNamespace, id: string, state: unknown, ttl = 86400 * 7): Promise<void> {
+async function putState(kv: GameKV, id: string, state: unknown, ttl = 86400 * 7): Promise<void> {
   await kv.put(id, JSON.stringify(state), { expirationTtl: ttl });
 }
 
@@ -342,7 +351,7 @@ const TOOLS = [
   // Hangman
   {
     name: "hangman_start",
-    description: "Start a Hangman game where YOU (Claude) pick the secret word and the human guesses. The word is stored in KV — never revealed in the conversation unless the game ends. The human must NOT expand the tool call to see the word (honor system). Returns session_id and the blank pattern.",
+    description: "Start a Hangman game where YOU (Claude) pick the secret word and the human guesses. The word is stored server-side — never revealed in the conversation unless the game ends. The human must NOT expand the tool call to see the word (honor system). Returns session_id and the blank pattern.",
     inputSchema: {
       type: "object",
       properties: {
@@ -366,7 +375,7 @@ const TOOLS = [
   },
   {
     name: "hangman_render",
-    description: "Render a Hangman board for a HUMAN-hosted game (human picked the word, Claude guesses). Call this after the human tells you whether your guessed letter was correct and what the new pattern is. No KV needed — pure renderer.",
+    description: "Render a Hangman board for a HUMAN-hosted game (human picked the word, Claude guesses). Call this after the human tells you whether your guessed letter was correct and what the new pattern is. No storage needed — pure renderer.",
     inputSchema: {
       type: "object",
       properties: {
@@ -437,7 +446,7 @@ const TOOLS = [
 // Tool handlers
 // ---------------------------------------------------------------------------
 
-async function handleTool(name: string, args: Record<string, unknown>, env: Env, origin: string): Promise<string> {
+async function handleTool(name: string, args: Record<string, unknown>, env: GameEnv, origin: string): Promise<string> {
   if (name.startsWith("rogue_")) return handleRogueTool(name, args, env);
   if (name.startsWith("chess_")) return handleChessTool(name, args, env, origin);
   switch (name) {
@@ -735,7 +744,7 @@ async function handleTool(name: string, args: Record<string, unknown>, env: Env,
     }
 
     case "hangman_render": {
-      // Pure renderer for human-hosted games — no KV
+      // Pure renderer for human-hosted games — no storage
       const rawPattern = (args.pattern as string).toUpperCase().replace(/\s+/g, " ").trim();
       const wrongLetters = ((args.wrong_letters as string[]) ?? []).map((l) => l.toUpperCase());
       const wrongCount = wrongLetters.length;
@@ -789,7 +798,7 @@ function jsonRpcError(id: string | number | null, code: number, message: string)
   });
 }
 
-async function handleMcp(request: Request, env: Env): Promise<Response> {
+async function handleMcp(request: Request, env: GameEnv): Promise<Response> {
   if (request.method === "OPTIONS") {
     return new Response(null, {
       headers: {
@@ -963,12 +972,12 @@ export default {
 
     // ---- Chess board page, its state poll, and tapped moves ----
     if (url.pathname.startsWith("/chess/")) {
-      return chessRoute(request, url, env);
+      return chessRoute(request, url, { GAME_STATE: gameStore(env) });
     }
 
     // ---- MCP endpoint ----
     if (url.pathname === "/mcp") {
-      return handleMcp(request, env);
+      return handleMcp(request, { GAME_STATE: gameStore(env) });
     }
 
     return new Response("Not found", { status: 404 });

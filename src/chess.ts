@@ -8,13 +8,14 @@
  */
 
 import { Chess, type Move } from "chess.js";
+import type { GameKV } from "./store";
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
 interface ChessEnv {
-  GAME_STATE: KVNamespace;
+  GAME_STATE: GameKV;
 }
 
 interface ChessState {
@@ -31,19 +32,19 @@ interface ChessState {
 const TTL = 86400 * 30; // refreshed on every write, so live games never expire
 
 // ---------------------------------------------------------------------------
-// KV + replay helpers
+// Storage + replay helpers
 // ---------------------------------------------------------------------------
 
 function makeId(): string {
   return `chess_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
 }
 
-async function load(kv: KVNamespace, id: string): Promise<ChessState | null> {
+async function load(kv: GameKV, id: string): Promise<ChessState | null> {
   const raw = await kv.get(id);
   return raw ? (JSON.parse(raw) as ChessState) : null;
 }
 
-async function save(kv: KVNamespace, id: string, state: ChessState): Promise<void> {
+async function save(kv: GameKV, id: string, state: ChessState): Promise<void> {
   await kv.put(id, JSON.stringify(state), { expirationTtl: TTL });
 }
 

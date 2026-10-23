@@ -12,3 +12,12 @@ preview_id = "151bf2db12704b7ca1d819c6374ba8de"
 [observability.logs]
 enabled = true
 invocation_logs = true
+# Game state lives in Durable Objects (one per session key). KV above is
+# kept only so games started before 10/23/26 can be copied over on first read.
+[[durable_objects.bindings]]
+name = "GAME_STORE"
+class_name = "GameStore"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["GameStore"]
